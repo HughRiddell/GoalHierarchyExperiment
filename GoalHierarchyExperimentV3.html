@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Goal Hierarchy Experiment</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1219; font-family: 'DM Sans', sans-serif; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #0f1219; }
+  ::-webkit-scrollbar-thumb { background: #2a3045; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a4055; }
+  @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+// ============================================================
+// SCENARIOS — domain/type kept for CSV only, masked from participant
+// ============================================================
+const SCENARIOS = [
+  {
+    id: "financial_facilitation",
+    domain: "financial",
+    type: "facilitation",
+    text: "Your sustained academic achievement lands you a paid internship in your field of study, which allows you to do work aligned with your studies and future career.",
+  },
+  {
+    id: "financial_conflict",
+    domain: "financial",
+    type: "conflict",
+    text: "Your landlord has let you know that your rent is about to increase from next month.",
+  },
+  {
+    id: "social_facilitation",
+    domain: "social",
+    type: "facilitation",
+    text: "You develop a friendship with a classmate who is enjoyable to attend class and study with.",
+  },
+  {
+    id: "social_conflict",
+    domain: "social",
+    type: "conflict",
+    text: "Friends regularly invite you to social events and outings during weeknights. These are enjoyable but often leave you tired the next morning.",
+  },
+  {
+    id: "health_facilitation",
+    domain: "health",
+    type: "facilitation",
+    text: "You set a new goal to exercise regularly, and you start to notice you feel more energised throughout the day.",
+  },
+  {
+    id: "health_conflict",
+    domain: "health",
+    type: "conflict",
+    text: "You experience a health issue that requires medical treatment, limiting the amount of energy you can dedicate to studies and other activities. Managing this chronic issue requires regular appointments during class times.",
+  },
+];
+
+const shuffleArray = (arr) => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
+// ============================================================
+// CONSTANTS & HELPERS
+// ============================================================
+const IMPORTANCE_LABELS = ["", "Not at all", "Slightly", "Moderately", "Very", "Extremely"];
+const IMPORTANCE_COLORS = ["", "#94a3b8", "#60a5fa", "#a78bfa", "#f472b6", "#f43f5e"];
+
+let idCounter = 0;
+const uid = () => `node_${++idCounter}`;
+
+const cloneTree = (node) => ({
+  ...node,
+  children: (node.children || []).map(cloneTree),
+});
+
+const findNode = (node, id) => {
+  if (node.id === id) return node;
+  for (const c of node.children || []) { const f = findNode(c, id); if (f) return f; }
+  return null;
+};
+
+const findParent = (node, id) => {
+  for (const c of node.children || []) {
+    if (c.id === id) return node;
+    const f = findParent(c, id); if (f) return f;
+  }
+  return null;
+};
+
+const countNodes = (n) => n ? 1 + (n.children || []).reduce((s, c) => s + countNodes(c), 0) : 0;
+const getMaxDepth = (n, d = 0) => (!n || !n.children?.length) ? d : Math.max(...n.children.map((c) => getMaxDepth(c, d + 1)));
+
+// ============================================================
+// CSV — all snapshots combined
+// ============================================================
+const generateFullCSV = (participantId, snapshots, scenarioOrder) => {
+  const allRows = [];
+  snapshots.forEach((snap) => {
+    const orderIndex = snap.timepoint === "baseline" ? 0
+      : scenarioOrder.findIndex((s) => s.id === snap.scenarioId) + 1;
+    const traverse = (node, parentLabel, level) => {
+      allRows.push({
+        participant_id: participantId,
+        timepoint: snap.timepoint,
+        presentation_order: orderIndex,
+        scenario_id: snap.scenarioId || "",
+        scenario_domain: snap.domain || "",
+        scenario_type: snap.type || "",
+        goal_id: node.id,
+        goal_label: node.label,
+        superordinate_goal: parentLabel || "",
+        level,
+        importance: node.importance,
+        n_subgoals: (node.children || []).length,
+      });
+      (node.children || []).forEach((child) => traverse(child, node.label, level + 1));
+    };
+    traverse(snap.tree, "", 0);
+  });
+  const header = "participant_id,timepoint,presentation_order,scenario_id,scenario_domain,scenario_type,goal_id,goal_label,superordinate_goal,level,importance,n_subgoals";
+  const csvRows = allRows.map((r) =>
+    `"${r.participant_id}","${r.timepoint}",${r.presentation_order},"${r.scenario_id}","${r.scenario_domain}","${r.scenario_type}","${r.goal_id}","${r.goal_label.replace(/"/g, '""')}","${r.superordinate_goal.replace(/"/g, '""')}",${r.level},${r.importance},${r.n_subgoals}`
+  );
+  return header + "\n" + csvRows.join("\n");
+};
+
+// Per-snapshot CSV: same columns and order as generateFullCSV, but rows only
+// (no header). Used so the data for each snapshot can be stored in its own
+// Qualtrics embedded data field, sidestepping per-field size limits. At
+// analysis time, concatenating one header + all snapshot strings reproduces
+// the standalone CSV format exactly.
+const generateSnapshotCSV = (participantId, snap, orderIndex) => {
+  const rows = [];
+  const traverse = (node, parentLabel, level) => {
+    rows.push(
+      `"${participantId}","${snap.timepoint}",${orderIndex},"${snap.scenarioId || ""}","${snap.domain || ""}","${snap.type || ""}","${node.id}","${(node.label || "").replace(/"/g, '""')}","${(parentLabel || "").replace(/"/g, '""')}",${level},${node.importance},${(node.children || []).length}`
+    );
+    (node.children || []).forEach((child) => traverse(child, node.label, level + 1));
+  };
+  traverse(snap.tree, "", 0);
+  return rows.join("\n");
+};
+
+// ============================================================
+// COMPONENTS
+// ============================================================
+
+// ------- GOAL MODAL (adding new goals only — label + importance) -------
+const GoalModal = ({ mode, onSave, onCancel, parentLabel }) => {
+  const [label, setLabel] = useState("");
+  const [importance, setImportance] = useState(3);
+  const inputRef = useRef(null);
+
+  useEffect(() => { setTimeout(() => inputRef.current?.focus(), 50); }, []);
+
+  const handleSubmit = () => {
+    if (!label.trim()) return;
+    onSave({ label: label.trim(), importance });
+  };
+
+  const title = mode === "focal" ? "Define Your Focal Academic Goal"
+    : `Add Sub-goal under "${parentLabel}"`;
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(15,20,30,0.55)",
+      backdropFilter: "blur(6px)", display: "flex", alignItems: "center",
+      justifyContent: "center", zIndex: 1000, animation: "fadeIn 0.2s ease",
+    }} onClick={onCancel}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: "#1a1f2e", border: "1px solid #2a3045", borderRadius: 16,
+        padding: "32px 36px", width: 440, maxWidth: "90vw",
+        boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
+      }}>
+        <h3 style={{
+          margin: "0 0 24px", color: "#e2e8f0", fontSize: 18,
+          fontWeight: 600, letterSpacing: "-0.01em",
+        }}>{title}</h3>
+
+        <label style={{
+          display: "block", color: "#94a3b8", fontSize: 12,
+          textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8,
+        }}>Goal Description</label>
+        <input ref={inputRef} value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+          placeholder={mode === "focal" ? "e.g., Achieve a high GPA this semester" : "e.g., Study for midterms"}
+          maxLength={120}
+          style={{
+            width: "100%", padding: "12px 14px", background: "#0f1219",
+            border: "1px solid #2a3045", borderRadius: 10, color: "#e2e8f0",
+            fontSize: 15, outline: "none", boxSizing: "border-box",
+            transition: "border-color 0.2s",
+          }}
+          onFocus={(e) => (e.target.style.borderColor = "#6366f1")}
+          onBlur={(e) => (e.target.style.borderColor = "#2a3045")}
+        />
+
+        <label style={{
+          display: "block", color: "#94a3b8", fontSize: 12,
+          textTransform: "uppercase", letterSpacing: "0.08em", margin: "20px 0 10px",
+        }}>Importance Rating</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          {[1, 2, 3, 4, 5].map((v) => (
+            <button key={v} onClick={() => setImportance(v)} style={{
+              flex: 1, padding: "10px 0",
+              background: importance === v ? IMPORTANCE_COLORS[v] + "22" : "#0f1219",
+              border: `2px solid ${importance === v ? IMPORTANCE_COLORS[v] : "#2a3045"}`,
+              borderRadius: 10, color: importance === v ? IMPORTANCE_COLORS[v] : "#64748b",
+              fontSize: 13, fontWeight: importance === v ? 700 : 500,
+              cursor: "pointer", transition: "all 0.15s",
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+            }}>
+              <span style={{ fontSize: 17, fontWeight: 700 }}>{v}</span>
+              <span style={{ fontSize: 9, opacity: 0.8 }}>{IMPORTANCE_LABELS[v]}</span>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginTop: 28, justifyContent: "flex-end" }}>
+          <button onClick={onCancel} style={{
+            padding: "10px 22px", background: "transparent", border: "1px solid #2a3045",
+            borderRadius: 10, color: "#94a3b8", fontSize: 14, cursor: "pointer",
+          }}>Cancel</button>
+          <button onClick={handleSubmit} disabled={!label.trim()} style={{
+            padding: "10px 28px", background: label.trim() ? "#6366f1" : "#2a3045",
+            border: "none", borderRadius: 10, color: label.trim() ? "#fff" : "#64748b",
+            fontSize: 14, fontWeight: 600, cursor: label.trim() ? "pointer" : "default",
+          }}>Add Goal</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ------- CONFIRM MODAL -------
+const ConfirmModal = ({ message, onConfirm, onCancel }) => (
+  <div style={{
+    position: "fixed", inset: 0, background: "rgba(15,20,30,0.55)",
+    backdropFilter: "blur(6px)", display: "flex", alignItems: "center",
+    justifyContent: "center", zIndex: 1000,
+  }} onClick={onCancel}>
+    <div onClick={(e) => e.stopPropagation()} style={{
+      background: "#1a1f2e", border: "1px solid #2a3045", borderRadius: 16,
+      padding: "28px 32px", width: 380, maxWidth: "90vw",
+      boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
+    }}>
+      <p style={{ color: "#e2e8f0", fontSize: 15, margin: "0 0 24px", lineHeight: 1.5 }}>{message}</p>
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+        <button onClick={onCancel} style={{
+          padding: "9px 20px", background: "transparent", border: "1px solid #2a3045",
+          borderRadius: 10, color: "#94a3b8", fontSize: 14, cursor: "pointer",
+        }}>Cancel</button>
+        <button onClick={onConfirm} style={{
+          padding: "9px 24px", background: "#ef4444", border: "none", borderRadius: 10,
+          color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer",
+        }}>Delete</button>
+      </div>
+    </div>
+  </div>
+);
+
+// ------- HORIZONTAL BAR -------
+const HorizontalBar = () => {
+  const ref = useRef(null);
+  const [dims, setDims] = useState({ left: 0, width: 0 });
+  useEffect(() => {
+    const measure = () => {
+      const parent = ref.current?.parentElement;
+      if (!parent) return;
+      const row = parent.querySelector("[data-children-row]");
+      if (!row) return;
+      const children = row.children;
+      if (children.length < 2) return;
+      const first = children[0];
+      const last = children[children.length - 1];
+      const parentRect = parent.getBoundingClientRect();
+      const firstRect = first.getBoundingClientRect();
+      const lastRect = last.getBoundingClientRect();
+      setDims({
+        left: firstRect.left + firstRect.width / 2 - parentRect.left,
+        width: lastRect.left + lastRect.width / 2 - firstRect.left - firstRect.width / 2,
+      });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const t = setTimeout(measure, 100);
+    return () => { window.removeEventListener("resize", measure); clearTimeout(t); };
+  });
+  return <div ref={ref} style={{
+    position: "absolute", top: 0, left: dims.left, width: dims.width,
+    height: 2, background: "#2a3045", pointerEvents: "none",
+  }} />;
+};
+
+// ------- INLINE IMPORTANCE — clickable 1-5 buttons on each node -------
+const InlineImportance = ({ value, onChange }) => (
+  <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+    {[1, 2, 3, 4, 5].map((v) => {
+      const color = IMPORTANCE_COLORS[v];
+      const active = value === v;
+      return (
+        <button key={v} onClick={(e) => { e.stopPropagation(); onChange(v); }}
+          title={`${v} — ${IMPORTANCE_LABELS[v]}`}
+          style={{
+            width: 28, height: 28, borderRadius: 8,
+            border: `1.5px solid ${active ? color : "#2a3045"}`,
+            background: active ? color + "25" : "#0f1219",
+            color: active ? color : "#475569",
+            fontSize: 12, fontWeight: active ? 800 : 500,
+            cursor: "pointer", transition: "all 0.12s",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: 0,
+          }}
+        >{v}</button>
+      );
+    })}
+    <span style={{
+      fontSize: 9, color: IMPORTANCE_COLORS[value] || "#64748b",
+      alignSelf: "center", marginLeft: 2, fontWeight: 600, minWidth: 50,
+    }}>{IMPORTANCE_LABELS[value]}</span>
+  </div>
+);
+
+// ------- TREE NODE -------
+const TreeNode = ({ node, level, onAdd, onDelete, onImportanceChange }) => {
+  const borderColor = IMPORTANCE_COLORS[node.importance] || "#6366f1";
+  const isRoot = level === 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+      <div style={{
+        background: "#1a1f2e", border: `2px solid ${borderColor}`, borderRadius: 14,
+        padding: "14px 18px", minWidth: isRoot ? 220 : 170, maxWidth: 260,
+        position: "relative",
+        boxShadow: `0 0 20px ${borderColor}15, 0 4px 16px rgba(0,0,0,0.3)`,
+        transition: "transform 0.15s, box-shadow 0.15s, border-color 0.3s", cursor: "default",
+      }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.transform = "translateY(-2px)";
+          e.currentTarget.style.boxShadow = `0 0 30px ${borderColor}25, 0 8px 24px rgba(0,0,0,0.4)`;
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.transform = "translateY(0)";
+          e.currentTarget.style.boxShadow = `0 0 20px ${borderColor}15, 0 4px 16px rgba(0,0,0,0.3)`;
+        }}
+      >
+        <div style={{
+          position: "absolute", top: -10, left: 14, background: "#0f1219",
+          border: `1px solid ${borderColor}`, borderRadius: 6, padding: "1px 8px",
+          fontSize: 10, fontFamily: "'JetBrains Mono', monospace",
+          color: borderColor, fontWeight: 600, transition: "all 0.3s",
+        }}>{isRoot ? "FOCAL" : `L${level}`}</div>
+
+        <div style={{
+          color: "#e2e8f0", fontSize: isRoot ? 15 : 13, fontWeight: isRoot ? 700 : 500,
+          lineHeight: 1.4, marginTop: 4, marginBottom: 10, wordBreak: "break-word",
+        }}>{node.label}</div>
+
+        <InlineImportance
+          value={node.importance}
+          onChange={(v) => onImportanceChange(node.id, v)}
+        />
+
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => onAdd(node.id)} style={{
+            flex: 1, padding: "5px 0", background: "#6366f120",
+            border: "1px solid #6366f140", borderRadius: 7, color: "#818cf8",
+            fontSize: 11, fontWeight: 600, cursor: "pointer",
+          }}
+            onMouseEnter={(e) => (e.target.style.background = "#6366f135")}
+            onMouseLeave={(e) => (e.target.style.background = "#6366f120")}
+          >+ Sub-goal</button>
+          {!isRoot && (
+            <button onClick={() => onDelete(node.id)} style={{
+              padding: "5px 10px", background: "#0f1219", border: "1px solid #2a3045",
+              borderRadius: 7, color: "#ef4444", fontSize: 11, cursor: "pointer",
+            }}>✕</button>
+          )}
+        </div>
+      </div>
+
+      {node.children && node.children.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+          <div style={{ width: 2, height: 28, background: "#2a3045" }} />
+          <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center" }}>
+            {node.children.length > 1 && <HorizontalBar />}
+            <div data-children-row="true" style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+              {node.children.map((child) => (
+                <div key={child.id} style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                  <div style={{ width: 2, height: 28, background: "#2a3045" }} />
+                  <TreeNode node={child} level={level + 1}
+                    onAdd={onAdd} onDelete={onDelete}
+                    onImportanceChange={onImportanceChange} />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ------- PROGRESS BAR -------
+const ProgressBar = ({ current, total }) => (
+  <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "0 24px" }}>
+    <div style={{ flex: 1, height: 4, background: "#2a3045", borderRadius: 2, overflow: "hidden" }}>
+      <div style={{
+        width: `${(current / total) * 100}%`, height: "100%",
+        background: "linear-gradient(90deg, #6366f1, #8b5cf6)",
+        borderRadius: 2, transition: "width 0.4s ease",
+      }} />
+    </div>
+    <span style={{
+      color: "#64748b", fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+      whiteSpace: "nowrap",
+    }}>{current} / {total}</span>
+  </div>
+);
+
+// ============================================================
+// MAIN EXPERIMENT APP
+// ============================================================
+const ExperimentApp = () => {
+  // Read participant ID from URL parameter (e.g. ?pid=R_abc123 from Qualtrics)
+  const urlPid = (() => {
+    try {
+      return new URLSearchParams(window.location.search).get("pid") || "";
+    } catch (e) { return ""; }
+  })();
+
+  const [phase, setPhase] = useState("welcome");
+  const [participantId, setParticipantId] = useState(urlPid);
+  const [tree, setTree] = useState(null);
+  const [modal, setModal] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const [scenarioOrder, setScenarioOrder] = useState([]);
+  const [currentScenarioIdx, setCurrentScenarioIdx] = useState(0);
+  const [snapshots, setSnapshots] = useState([]);
+
+  const handleBegin = () => {
+    if (!participantId.trim()) return;
+    setScenarioOrder(shuffleArray(SCENARIOS));
+    setPhase("baseline_build");
+    setModal({ mode: "focal" });
+  };
+
+  // Auto-start if participant ID was supplied via URL (Qualtrics embedding)
+  useEffect(() => {
+    if (urlPid && phase === "welcome") {
+      setScenarioOrder(shuffleArray(SCENARIOS));
+      setPhase("baseline_build");
+      setModal({ mode: "focal" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Tree manipulation ---
+  const handleAddSubgoal = (parentId) => {
+    const parent = findNode(tree, parentId);
+    setModal({ mode: "add", parentId, parentLabel: parent?.label });
+  };
+
+  const handleDelete = (nodeId) => {
+    const node = findNode(tree, nodeId);
+    const cc = countNodes(node) - 1;
+    setConfirmDelete({ nodeId, message: cc > 0
+      ? `Delete "${node.label}" and its ${cc} sub-goal${cc > 1 ? "s" : ""}?`
+      : `Delete "${node.label}"?`
+    });
+  };
+
+  const executeDelete = (nodeId) => {
+    const nt = cloneTree(tree);
+    const p = findParent(nt, nodeId);
+    if (p) p.children = p.children.filter((c) => c.id !== nodeId);
+    setTree(nt);
+    setConfirmDelete(null);
+  };
+
+  const handleImportanceChange = (nodeId, newImportance) => {
+    const nt = cloneTree(tree);
+    const n = findNode(nt, nodeId);
+    if (n) n.importance = newImportance;
+    setTree(nt);
+  };
+
+  const handleModalSave = ({ label, importance }) => {
+    if (modal.mode === "focal") {
+      setTree({ id: uid(), label, importance, children: [] });
+    } else if (modal.mode === "add") {
+      const nt = cloneTree(tree);
+      const p = findNode(nt, modal.parentId);
+      if (p) { if (!p.children) p.children = []; p.children.push({ id: uid(), label, importance, children: [] }); }
+      setTree(nt);
+    }
+    setModal(null);
+  };
+
+  // --- Phase transitions ---
+  const handleSaveBaseline = () => {
+    if (!tree) return;
+    setSnapshots([{
+      timepoint: "baseline", scenarioId: "", domain: "", type: "",
+      tree: cloneTree(tree),
+    }]);
+    setCurrentScenarioIdx(0);
+    setPhase("scenario_read");
+  };
+
+  const handleScenarioRead = () => {
+    // Reset tree to baseline before each scenario
+    const baselineTree = snapshots[0].tree;
+    setTree(cloneTree(baselineTree));
+    setPhase("scenario_edit");
+  };
+
+  const handleSaveScenario = () => {
+    if (!tree) return;
+    const scenario = scenarioOrder[currentScenarioIdx];
+    const newSnapshots = [...snapshots, {
+      timepoint: `scenario_${currentScenarioIdx + 1}`,
+      scenarioId: scenario.id,
+      domain: scenario.domain,
+      type: scenario.type,
+      tree: cloneTree(tree),
+    }];
+    setSnapshots(newSnapshots);
+
+    if (currentScenarioIdx + 1 < scenarioOrder.length) {
+      setCurrentScenarioIdx(currentScenarioIdx + 1);
+      setPhase("scenario_read");
+    } else {
+      const pidClean = participantId.trim();
+
+      // Build one CSV string per snapshot (no header — just rows). Each is
+      // stored in its own embedded data field on the Qualtrics side, to keep
+      // every field well under Qualtrics' per-field size limit (~1KB in the
+      // New Survey Taking Experience, 20KB historically). Concatenating one
+      // header plus these strings at analysis time reproduces the original
+      // long-format CSV exactly.
+      const snapshotCsvs = {};
+      newSnapshots.forEach((snap) => {
+        const orderIndex = snap.timepoint === "baseline" ? 0
+          : scenarioOrder.findIndex((s) => s.id === snap.scenarioId) + 1;
+        const key = snap.timepoint === "baseline"
+          ? "hierarchy_baseline_csv"
+          : `hierarchy_s${orderIndex}_csv`;
+        snapshotCsvs[key] = generateSnapshotCSV(pidClean, snap, orderIndex);
+      });
+
+      // Defensive: ensure JSON-serialisable (cloneTree already returns plain
+      // objects, but belt-and-braces).
+      const cleanSnapshots = JSON.parse(JSON.stringify(newSnapshots));
+
+      // Send to the parent Qualtrics window via postMessage. Qualtrics-side
+      // JS listens for { type: 'hierarchy_complete' } and writes each
+      // snapshot CSV plus the metadata to embedded data.
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({
+            type: "hierarchy_complete",
+            participantId: pidClean,
+            scenarioOrder: scenarioOrder.map((s) => s.id),
+            snapshots: cleanSnapshots,
+            snapshotCsvs: snapshotCsvs,
+          }, "*");
+        }
+      } catch (e) {
+        console.warn("postMessage to parent failed:", e);
+      }
+
+      setPhase("complete");
+    }
+  };
+
+  // ==================== RENDERS ====================
+
+  const currentScenario = scenarioOrder[currentScenarioIdx];
+  const totalSteps = scenarioOrder.length + 1;
+  const currentStep = phase === "baseline_build" ? 1
+    : (phase === "scenario_read" || phase === "scenario_edit") ? currentScenarioIdx + 2
+    : totalSteps;
+
+  // --- WELCOME ---
+  if (phase === "welcome") {
+    return (
+      <div style={{
+        minHeight: "100vh", background: "#0f1219", display: "flex",
+        alignItems: "center", justifyContent: "center",
+      }}>
+        <div style={{
+          background: "#1a1f2e", border: "1px solid #2a3045", borderRadius: 20,
+          padding: "48px 52px", width: 480, maxWidth: "90vw", textAlign: "center",
+          boxShadow: "0 24px 80px rgba(0,0,0,0.4)",
+        }}>
+          <div style={{
+            width: 56, height: 56, margin: "0 auto 20px",
+            background: "linear-gradient(135deg, #6366f1, #8b5cf6)", borderRadius: 14,
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26,
+          }}>🎯</div>
+
+          <h1 style={{
+            color: "#e2e8f0", fontSize: 24, fontWeight: 700, margin: "0 0 8px",
+            letterSpacing: "-0.02em",
+          }}>Goal Hierarchy Study</h1>
+
+          <p style={{ color: "#64748b", fontSize: 14, margin: "0 0 12px", lineHeight: 1.6 }}>
+            In this study you will build a hierarchy of your academic goals, then consider how
+            different life situations might change that hierarchy.
+          </p>
+          <p style={{ color: "#475569", fontSize: 13, margin: "0 0 28px", lineHeight: 1.6 }}>
+            You will first create your baseline goal hierarchy, then respond to 6 scenarios.
+            After each scenario, you can revise your hierarchy by adding, removing, or re-rating
+            the importance of your goals.
+          </p>
+
+          <div style={{ textAlign: "left", marginBottom: 20 }}>
+            <label style={{
+              display: "block", color: "#94a3b8", fontSize: 12,
+              textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8,
+            }}>Participant ID</label>
+            <input value={participantId}
+              onChange={(e) => setParticipantId(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleBegin()}
+              placeholder="Enter your participant ID"
+              style={{
+                width: "100%", padding: "13px 16px", background: "#0f1219",
+                border: "1px solid #2a3045", borderRadius: 10, color: "#e2e8f0", fontSize: 15,
+                outline: "none", boxSizing: "border-box",
+                fontFamily: "'JetBrains Mono', monospace", transition: "border-color 0.2s",
+              }}
+              onFocus={(e) => (e.target.style.borderColor = "#6366f1")}
+              onBlur={(e) => (e.target.style.borderColor = "#2a3045")}
+            />
+          </div>
+
+          <button onClick={handleBegin} disabled={!participantId.trim()} style={{
+            width: "100%", padding: "13px 0",
+            background: participantId.trim() ? "linear-gradient(135deg, #6366f1, #8b5cf6)" : "#2a3045",
+            border: "none", borderRadius: 10,
+            color: participantId.trim() ? "#fff" : "#64748b",
+            fontSize: 15, fontWeight: 600, cursor: participantId.trim() ? "pointer" : "default",
+          }}>Begin Study →</button>
+        </div>
+      </div>
+    );
+  }
+
+  // --- SCENARIO READ (neutral — no domain/type shown) ---
+  if (phase === "scenario_read") {
+    const s = currentScenario;
+    return (
+      <div style={{
+        minHeight: "100vh", background: "#0f1219", display: "flex",
+        flexDirection: "column", alignItems: "center", justifyContent: "center",
+        padding: 24,
+      }}>
+        <div style={{ width: "100%", maxWidth: 560, marginBottom: 24 }}>
+          <ProgressBar current={currentStep} total={totalSteps} />
+        </div>
+
+        <div style={{
+          background: "#1a1f2e", border: "1px solid #2a3045", borderRadius: 20,
+          padding: "44px 48px", width: 560, maxWidth: "90vw",
+          boxShadow: "0 24px 80px rgba(0,0,0,0.4)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 24 }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: 12,
+              background: "#6366f118", border: "1px solid #6366f130",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 22, color: "#818cf8", fontFamily: "'JetBrains Mono', monospace",
+              fontWeight: 700,
+            }}>{currentScenarioIdx + 1}</div>
+            <div>
+              <div style={{
+                fontSize: 10, fontFamily: "'JetBrains Mono', monospace",
+                color: "#6366f1", fontWeight: 600, textTransform: "uppercase",
+                letterSpacing: "0.1em", marginBottom: 2,
+              }}>Scenario {currentScenarioIdx + 1} of {scenarioOrder.length}</div>
+              <div style={{ color: "#e2e8f0", fontSize: 18, fontWeight: 700 }}>Life Situation</div>
+            </div>
+          </div>
+
+          <div style={{
+            background: "#0f1219", border: "1px solid #2a3045", borderRadius: 12,
+            padding: "24px 28px", marginBottom: 28,
+          }}>
+            <p style={{ color: "#94a3b8", fontSize: 13, fontStyle: "italic", lineHeight: 1.7, margin: "0 0 16px" }}>
+              Imagine the following situation occurs during your semester:
+            </p>
+            <p style={{ color: "#e2e8f0", fontSize: 15, lineHeight: 1.7, margin: 0 }}>
+              {s.text}
+            </p>
+          </div>
+
+          <p style={{ color: "#94a3b8", fontSize: 13, lineHeight: 1.6, marginBottom: 24 }}>
+            Considering this scenario, please revise your goal hierarchy on the next screen.
+            You may add, remove, or change the importance of any goals to reflect how this
+            situation would affect your academic goal pursuit.
+          </p>
+
+          <button onClick={handleScenarioRead} style={{
+            width: "100%", padding: "13px 0",
+            background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+            border: "none", borderRadius: 10, color: "#fff",
+            fontSize: 15, fontWeight: 600, cursor: "pointer",
+          }}>Revise My Hierarchy →</button>
+        </div>
+      </div>
+    );
+  }
+
+  // --- COMPLETE ---
+  if (phase === "complete") {
+    return (
+      <div style={{
+        minHeight: "100vh", background: "#0f1219", display: "flex",
+        alignItems: "center", justifyContent: "center",
+      }}>
+        <div style={{
+          background: "#1a1f2e", border: "1px solid #2a3045", borderRadius: 20,
+          padding: "48px 52px", width: 480, maxWidth: "90vw", textAlign: "center",
+          boxShadow: "0 24px 80px rgba(0,0,0,0.4)",
+        }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>✓</div>
+          <h2 style={{ color: "#e2e8f0", fontSize: 22, fontWeight: 700, margin: "0 0 12px" }}>
+            Study Complete
+          </h2>
+          <p style={{ color: "#64748b", fontSize: 14, margin: 0, lineHeight: 1.6 }}>
+            Thank you for participating! Your responses have been recorded. The
+            survey will continue in a moment — if it does not advance automatically,
+            please click the next button below.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // --- TREE BUILDER (baseline_build & scenario_edit) ---
+  const isBaseline = phase === "baseline_build";
+  const headerLabel = isBaseline ? "Baseline Hierarchy"
+    : `Scenario ${currentScenarioIdx + 1} of ${scenarioOrder.length}`;
+  const headerSub = isBaseline
+    ? "Build your initial academic goal hierarchy"
+    : "Revise your hierarchy to reflect this scenario";
+  const saveLabel = isBaseline ? "Save Baseline & Continue" : "Save & Continue";
+  const onSave = isBaseline ? handleSaveBaseline : handleSaveScenario;
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#0f1219", display: "flex", flexDirection: "column",
+    }}>
+      {/* Top bar */}
+      <div style={{
+        background: "#1a1f2e", borderBottom: "1px solid #2a3045",
+        padding: "10px 24px", flexShrink: 0,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{
+              background: "linear-gradient(135deg, #6366f1, #8b5cf6)", borderRadius: 8,
+              width: 32, height: 32, display: "flex", alignItems: "center",
+              justifyContent: "center", fontSize: 16,
+            }}>🎯</div>
+            <div>
+              <div style={{ color: "#e2e8f0", fontSize: 14, fontWeight: 600 }}>{headerLabel}</div>
+              <div style={{ color: "#64748b", fontSize: 11 }}>{headerSub}
+                <span style={{ marginLeft: 10, fontFamily: "'JetBrains Mono', monospace" }}>
+                  ID: {participantId}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {tree && (
+              <span style={{ color: "#64748b", fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>
+                {countNodes(tree)} goal{countNodes(tree) !== 1 ? "s" : ""} · {getMaxDepth(tree) + 1} level{getMaxDepth(tree) > 0 ? "s" : ""}
+              </span>
+            )}
+            {tree && (
+              <button onClick={onSave} style={{
+                padding: "8px 20px",
+                background: "linear-gradient(135deg, #10b981, #059669)",
+                border: "none", borderRadius: 8, color: "#fff", fontSize: 13,
+                fontWeight: 600, cursor: "pointer", transition: "opacity 0.2s",
+              }}
+                onMouseEnter={(e) => (e.target.style.opacity = "0.85")}
+                onMouseLeave={(e) => (e.target.style.opacity = "1")}
+              >{saveLabel} →</button>
+            )}
+          </div>
+        </div>
+        <ProgressBar current={currentStep} total={totalSteps} />
+      </div>
+
+      {/* Scenario reminder banner (neutral — during scenario editing only) */}
+      {!isBaseline && currentScenario && (
+        <div style={{
+          background: "#6366f108",
+          borderBottom: "1px solid #6366f120",
+          padding: "12px 24px", display: "flex", alignItems: "flex-start", gap: 12,
+          flexShrink: 0,
+        }}>
+          <div style={{
+            width: 28, height: 28, borderRadius: 7,
+            background: "#6366f118", display: "flex", alignItems: "center",
+            justifyContent: "center", fontSize: 13, color: "#818cf8",
+            fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, flexShrink: 0,
+            marginTop: 2,
+          }}>{currentScenarioIdx + 1}</div>
+          <div>
+            <div style={{
+              color: "#6366f1", fontSize: 10, fontWeight: 700,
+              textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}>CURRENT SCENARIO</div>
+            <div style={{ color: "#cbd5e1", fontSize: 13, lineHeight: 1.5 }}>
+              {currentScenario.text}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tree area */}
+      <div style={{
+        flex: 1, overflow: "auto", padding: "40px 24px 60px",
+        display: "flex", justifyContent: "center", alignItems: "flex-start",
+      }}>
+        {tree ? (
+          <TreeNode node={tree} level={0}
+            onAdd={handleAddSubgoal} onDelete={handleDelete}
+            onImportanceChange={handleImportanceChange} />
+        ) : (
+          <div style={{ color: "#64748b", fontSize: 14, marginTop: 100 }}>Setting up your focal goal...</div>
+        )}
+      </div>
+
+      {/* Footer */}
+      {tree && (
+        <div style={{
+          background: "#1a1f2e", borderTop: "1px solid #2a3045",
+          padding: "10px 24px", textAlign: "center", flexShrink: 0,
+        }}>
+          <span style={{ color: "#475569", fontSize: 12 }}>
+            Click <strong style={{ color: "#818cf8" }}>1–5</strong> on any goal to adjust importance
+            · <strong style={{ color: "#818cf8" }}>+ Sub-goal</strong> to add branches
+            · <strong style={{ color: "#ef4444" }}>✕</strong> to remove
+            · <strong style={{ color: "#10b981" }}>{saveLabel}</strong> when done
+          </span>
+        </div>
+      )}
+
+      {/* Modals */}
+      {modal && (
+        <GoalModal mode={modal.mode} parentLabel={modal.parentLabel}
+          onSave={handleModalSave}
+          onCancel={() => { if (modal.mode === "focal" && !tree) return; setModal(null); }}
+        />
+      )}
+      {confirmDelete && (
+        <ConfirmModal message={confirmDelete.message}
+          onConfirm={() => executeDelete(confirmDelete.nodeId)}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<ExperimentApp />);
+</script>
+</body>
+</html>
